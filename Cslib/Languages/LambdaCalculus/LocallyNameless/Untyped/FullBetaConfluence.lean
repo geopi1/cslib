@@ -9,7 +9,15 @@ module
 public import Cslib.Languages.LambdaCalculus.LocallyNameless.Untyped.FullBeta
 public import Cslib.Foundations.Relation.Confluence
 
-/-! # β-confluence for the λ-calculus -/
+/-! # β-confluence for the λ-calculus
+
+Confluence of full β-reduction is proved via parallel reduction `⭢ₚ`, whose diamond property follows
+from Takahashi's triangle property for complete developments (`para_dev_triangle`).
+
+## References
+
+* [M. Takahashi, *Parallel reductions in λ-calculus*][Takahashi1995]
+-/
 
 @[expose] public section
 
@@ -136,72 +144,121 @@ lemma para_open_out (L : Finset Var) (mem : ∀ x, x ∉ L → (M ^ fvar x) ⭢�
     (para : M' ⭢ₚ N') : (M ^ M') ⭢ₚ (N ^ N') := by
   grind [fresh_exists <| free_union [fv] Var]
 
--- TODO: the Takahashi translation would be a much nicer and shorter proof, but I had difficultly
--- writing it for locally nameless terms.
+/-! ### Complete developments and the triangle property
 
--- adapted from https://github.com/ElifUskuplu/Stlc_deBruijn/blob/main/Stlc/confluence.lean
+Following Takahashi, a parallel step `M ⭢ₚ N` can always be completed to the *complete development*
+`M*` of `M`, which contracts all redexes of `M` at once: `N ⭢ₚ M*` (`para_dev_triangle`). The
+diamond property of `⭢ₚ` follows immediately (`Diamond.of_triangle`).
+
+The usual recursive definition of `M*` (with `(λ m) n ↦ m* ^ n*`) does not commute with opening on
+locally nameless terms with dangling indices, so complete developments are defined here as a
+relation, with cofinite quantification as for `Parallel`.
+-/
+
+/-- `Dev M M'` holds when `M'` is the complete development of `M`, which contracts all redexes of
+`M` simultaneously. -/
+inductive Dev : Term Var → Term Var → Prop
+/-- Free variables develop to themselves. -/
+| fvar (x : Var) : Dev (fvar x) (fvar x)
+/-- An application that is not a redex develops both of its sides. -/
+| app : ¬IsAbs t → Dev t t' → Dev u u' → Dev (app t u) (app t' u')
+/-- An abstraction develops its body. -/
+| abs (xs : Finset Var) :
+    (∀ x ∉ xs, Dev (m ^ fvar x) (m' ^ fvar x)) → Dev (abs m) (abs m')
+/-- A redex is contracted after developing both of its sides. -/
+| beta (xs : Finset Var) :
+    (∀ x ∉ xs, Dev (m ^ fvar x) (m' ^ fvar x)) → Dev n n' → Dev (app (abs m) n) (m' ^ n')
+
+omit [HasFresh Var] [DecidableEq Var] in
+/-- A complete development is a parallel reduction. -/
+lemma Dev.to_parallel (h : Dev M N) : M ⭢ₚ N := by
+  induction h <;> constructor <;> assumption
+
+omit [HasFresh Var] in
+/-- Renaming a free variable does not create an abstraction. -/
+private lemma not_isAbs_subst_fvar {t : Term Var} (x y : Var) (h : ¬IsAbs t) :
+    ¬IsAbs (t[x := fvar y]) := by
+  cases t <;> grind
+
+/-- Complete developments are preserved by renaming free variables. -/
+lemma Dev.subst_fvar (x y : Var) (h : Dev M N) :
+    Dev (M[x := Term.fvar y]) (N[x := Term.fvar y]) := by
+  induction h with
+  | fvar z => rw [Term.subst_fvar]; split <;> exact Dev.fvar _
+  | app hna _ _ ih₁ ih₂ =>
+    rw [subst_app, subst_app]
+    exact Dev.app (not_isAbs_subst_fvar x y hna) ih₁ ih₂
+  | abs xs _ ih =>
+    rw [subst_abs, subst_abs]
+    refine Dev.abs (xs ∪ {x}) fun z hz => ?_
+    have hzx : x ≠ z := by grind
+    rw [← subst_open_var z x _ _ hzx (LC.fvar y), ← subst_open_var z x _ _ hzx (LC.fvar y)]
+    exact ih z (by grind)
+  | beta xs _ _ ih₁ ih₂ =>
+    rw [subst_app, subst_abs, subst_open x (Term.fvar y) _ _ (LC.fvar y)]
+    refine Dev.beta (xs ∪ {x}) (fun z hz => ?_) ih₂
+    have hzx : x ≠ z := by grind
+    rw [← subst_open_var z x _ _ hzx (LC.fvar y), ← subst_open_var z x _ _ hzx (LC.fvar y)]
+    exact ih₁ z (by grind)
+
+/-- Every locally closed term has a complete development. -/
+lemma Dev.exists_of_lc (h : LC M) : ∃ N, Dev M N := by
+  induction h with
+  | fvar x => exact ⟨_, Dev.fvar x⟩
+  | abs L e _ ih =>
+    -- Develop the body at one fresh variable `y`, then rename `y` to any other fresh variable.
+    obtain ⟨y, hy⟩ := fresh_exists (L ∪ e.fv)
+    obtain ⟨N, hN⟩ := ih y (by grind)
+    have hN_lc : LC N := para_lc_r hN.to_parallel
+    refine ⟨Term.abs (N ^* y), Dev.abs (L ∪ e.fv ∪ {y}) fun x hx => ?_⟩
+    rw [subst_intro y (Term.fvar x) e (by grind),
+      close_open_to_subst N (Term.fvar x) y hN_lc (LC.fvar x)]
+    exact hN.subst_fvar y x
+  | @app l r _ _ ih₁ ih₂ =>
+    obtain ⟨l', hl'⟩ := ih₁
+    obtain ⟨r', hr'⟩ := ih₂
+    by_cases hl : IsAbs l
+    · cases hl
+      cases hl' with
+      | abs xs hbody => exact ⟨_, Dev.beta xs hbody hr'⟩
+    · exact ⟨_, Dev.app hl hl' hr'⟩
+
+/-- **The triangle property** (Takahashi): a parallel step from `M` can be completed to the complete
+development of `M` by another parallel step. -/
+theorem para_dev_triangle (h : M ⭢ₚ N) : ∀ {D}, Dev M D → N ⭢ₚ D := by
+  induction h with
+  | fvar x =>
+    intro D hD
+    cases hD
+    exact Parallel.fvar x
+  | app hL hM ihL ihM =>
+    intro D hD
+    cases hD with
+    | app _ hdL hdM => exact Parallel.app (ihL hdL) (ihM hdM)
+    | beta xs hbody hdn =>
+      -- The left side is an abstraction, so its parallel step is one as well.
+      cases hL with
+      | abs ys _ =>
+        cases ihL (Dev.abs xs hbody) with
+        | abs zs hz => exact Parallel.beta zs hz (ihM hdn)
+  | abs xs _ ih =>
+    intro D hD
+    cases hD with
+    | abs ys hdev => exact Parallel.abs (xs ∪ ys) fun x hx => ih x (by grind) (hdev x (by grind))
+  | beta xs _ _ ihb ihn =>
+    intro D hD
+    cases hD with
+    | app hna _ _ => exact absurd (IsAbs.abs _) hna
+    | beta ys hdev hdn =>
+      exact para_open_out (xs ∪ ys) (fun x hx => ihb x (by grind) (hdev x (by grind))) (ihn hdn)
+
 /-- Parallel reduction has the diamond property. -/
 theorem parallel_diamond : Diamond ((· ⭢ₚ ·) : Term Var → Term Var → Prop) := by
-  intros t t1 t2 tpt1
-  revert t2
-  induction tpt1 <;> intros t2 tpt2
-  case fvar x => exact ⟨t2, by grind⟩
-  case abs s1 s2' xs mem ih =>
-    cases tpt2
-    case abs t2' xs' mem' =>
-      have ⟨x, qx⟩ := fresh_exists (xs ∪ xs' ∪ free_union [fv] Var)
-      simp only [Finset.union_assoc, Finset.mem_union, not_or] at qx
-      have ⟨q1, q2, _⟩ := qx
-      have ⟨t', _⟩ := ih x q1 (mem' _ q2)
-      exists abs (t' ^* x)
-      constructor
-      <;> [let z := s2' ^ fvar x; let z := t2' ^ fvar x]
-      <;> apply Parallel.abs (free_union [fv] Var) <;> grind
-  case beta s1 s1' s2 s2' xs mem ps ih1 ih2 =>
-    cases tpt2
-    case app u2 u2' s1pu2 s2pu2' =>
-      cases s1pu2
-      case abs s1'' xs' mem' =>
-        have ⟨x, qx⟩ := fresh_exists (xs ∪ xs' ∪ free_union [fv] Var)
-        simp only [Finset.union_assoc, Finset.mem_union, not_or] at qx
-        obtain ⟨q1, q2, _⟩ := qx
-        have ⟨t', _⟩ := ih2 s2pu2'
-        have ⟨t'', _⟩ := @ih1 x q1 _ (mem' _ q2)
-        exists (t'' ^* x) ^ t'
-        constructor
-        · #adaptation_note
-          /-- Moving from `nightly-2025-09-15` to `nightly-2025-10-19`, the grind_pattern for
-          subst_intro (defined in Properties.lean) stopped working here. -/
-          grind [subst_intro]
-        · apply Parallel.beta (free_union [fv] Var) <;> grind
-    case beta u1' u2' xs' mem' s2pu2' =>
-      have ⟨x, qx⟩ := fresh_exists (xs ∪ xs' ∪ free_union [fv] Var)
-      simp only [Finset.union_assoc, Finset.mem_union, not_or] at qx
-      have ⟨q1, q2, _⟩ := qx
-      have ⟨t', _⟩ := ih2 s2pu2'
-      have ⟨t'', _⟩ := @ih1 x q1 _ (mem' _ q2)
-      refine ⟨t''[x := t'], ?_⟩
-      grind
-  case app s1 s1' s2 s2' s1ps1' _ ih1 ih2  =>
-    cases tpt2
-    case app u1 u2' s1 s2 =>
-      have ⟨l, _, _⟩ := ih1 s1
-      have ⟨r, _, _⟩ := ih2 s2
-      exact ⟨app l r, by grind⟩
-    case beta t1' u1' u2' xs mem s2pu2' =>
-      cases s1ps1'
-      case abs s1'' xs' mem' =>
-        have ⟨x, qx⟩ := fresh_exists (xs ∪ xs' ∪ free_union [fv] Var)
-        simp only [Finset.union_assoc, Finset.mem_union, not_or] at qx
-        obtain ⟨q1, q2, _⟩ := qx
-        have ⟨t', qt'_l, qt'_r⟩ := ih2 s2pu2'
-        have ⟨t'', qt''_l, qt''_r⟩ := @ih1 (abs u1') (Parallel.abs xs mem)
-        cases qt''_l
-        next w1 xs'' mem'' =>
-        cases qt''_r
-        case abs xs''' mem''' =>
-          refine ⟨w1 ^ t', ?_, para_open_out xs''' mem''' qt'_r⟩
-          apply Parallel.beta (free_union Var) <;> grind
+  refine Diamond.of_triangle fun M => ?_
+  by_cases hM : LC M
+  · obtain ⟨D, hD⟩ := Dev.exists_of_lc hM
+    exact ⟨D, fun _ hN => para_dev_triangle hN hD⟩
+  · exact ⟨M, fun _ hN => absurd (para_lc_l hN) hM⟩
 
 /-- Parallel reduction is confluent. -/
 theorem confluent_parallel : Confluent ((· ⭢ₚ ·) : Term Var → Term Var → Prop) :=

@@ -15,6 +15,7 @@ This module proves some properties regarding confluence that are used for both l
 combinatory logic. Some notable theorems:
 
 * `Diamond.to_confluent`: the diamond property implies confluence
+* `Diamond.of_triangle`: the triangle property implies the diamond property
 * `LocallyConfluent.terminating_toConfluent`: Newman's lemma
 
 We prove most results first for two relations, where `Confluent r` becomes `Commute r₁ r₂`, then
@@ -164,6 +165,14 @@ theorem confluent_iff_semiConfluent : Confluent r ↔ SemiConfluent r :=
   confluent_iff_semiConfluent
 
 theorem Diamond.to_confluent (h : Diamond r) : Confluent r := DiamondCommute.to_commute h
+
+/-- The triangle property implies the diamond property: if every `a` has an element `d` that all
+`r`-successors of `a` reach in one `r`-step (for instance, a complete development of `a`), then `r`
+has the diamond property. This is the core of Takahashi's proof of confluence. -/
+theorem Diamond.of_triangle (h : ∀ a, ∃ d, ∀ b, r a b → r b d) : Diamond r := by
+  intro a b c hab hac
+  obtain ⟨d, hd⟩ := h a
+  exact ⟨d, hd b hab, hd c hac⟩
 
 @[deprecated (since := "2026-09-03")] alias Diamond.toConfluent := Diamond.to_confluent
 
